@@ -1,0 +1,8 @@
+name: astrbot_plugin_command_guard
+display_name: 指令守卫
+short_desc: 按全局默认与会话（UMO）规则忽略指定指令或非管理员指令，被忽略时静默不响应。
+desc: 为 AstrBot 提供指令级访问控制：可设置全局默认规则，并针对不同会话/UMO 单独精细化配置（优先级高于全局）；可忽略非管理员发出的指令；可自设要忽略的指令清单与始终放行的白名单。被忽略的指令不会执行、不会回复，也不会触发 LLM，仅在日志中留下记录。
+version: 1.0.0
+author: cyilin
+repo: https://github.com/cyilin36/astrbot_plugin_command_guard
+astrbot_version: ">=4.25.0"
