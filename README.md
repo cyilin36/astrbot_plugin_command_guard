@@ -6,6 +6,8 @@
 
 - 全局设置：可忽略非管理员发出的指令，可自设忽略清单与始终放行清单。
 - 会话（UMO）规则：为单个会话单独开关守卫、单独设置忽略非管理员与两个清单；UMO 从 AstrBot 现有会话中下拉选择，无需手填。
+- 支持指令组：填一个组名（如 `cr`）即屏蔽整组，包括 `cr`、`cr list`、`cr lora`。
+- 命中即终止：判定为忽略后事件在唤醒检查阶段就被终止，不再进入后续阶段，也不会有任何回复。
 - 管理员始终放行，直接复用 AstrBot 自带的 `admins_id`，不需要额外配置。
 - 机器人自身发出的事件始终放行，交由 AstrBot 自行处理。
 - 被忽略的指令必然在日志中留下一条 INFO，没有开关能关掉它。
@@ -36,7 +38,7 @@ git clone https://github.com/cyilin36/astrbot_plugin_command_guard.git
 | 配置项 | 类型 | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
 | `ignore_non_admin` | bool | `false` | 忽略非管理员发出的指令。管理员由 AstrBot 的 `admins_id` 判定。 |
-| `ignored_commands` | list | `[]` | 要忽略的指令，如 `帮助`、`群管`。可带 `/` 前缀。 |
+| `ignored_commands` | list | `[]` | 要忽略的指令，如 `帮助`、`群管`。可带 `/` 前缀。填指令组名即屏蔽整组。 |
 | `exempt_commands` | list | `[]` | 始终放行的指令，优先级最高，会压过「忽略非管理员」与忽略清单。 |
 | `hard_silence` | bool | `true` | 彻底静默，同时屏蔽 AstrBot 自带的权限与参数提示。 |
 | `session_rules` | template_list | `[]` | 会话规则，见下。 |
@@ -105,6 +107,31 @@ git clone https://github.com/cyilin36/astrbot_plugin_command_guard.git
 - 配置项与指令名完全相等，或以「配置项 + 空格」开头即视为命中，因此填写指令组名可覆盖其子指令。
 - 指令名不区分大小写，配置项首尾空白与 `/` 前缀会被忽略。
 
+### 指令组
+
+AstrBot 的指令组（`@filter.command_group` 注册，如 `cr`）会展开成组名与子指令两套 handler。本插件按「前缀 + 空格」匹配，因此：
+
+| 忽略清单里填 | 会被忽略 | 不会被忽略 |
+| :--- | :--- | :--- |
+| `cr` | `cr`、`cr list`、`cr lora`、`cr 任意子指令` | `抽卡`、`crx` |
+| `cr list` | `cr list`（含带参数形式） | `cr`、`cr lora` |
+
+只输入组名（如裸 `cr`）时，AstrBot 原生会回复「参数不足 + 指令树」。被忽略后这条提示同样不会发出。
+
+## 命中之后
+
+判定为忽略时，守卫在唤醒检查阶段就调用 `event.stop_event()` 并让指令 handler 全部跳过，因此：
+
+- 指令 handler 不会执行，不会有任何回复；
+- 不进入限流、内容安全、预处理等后续阶段；
+- 不触发 LLM 请求；
+- 其它监听所有消息的插件监听器也不会被调用（事件在唤醒阶段就被终止）；
+- 只写一条 INFO 日志。
+
+这与「机器人根本没收到这条消息」的观感一致。唯一区别是日志里会留下记录。
+
+关闭 `hard_silence` 后只剩兜底监听器，它在处理阶段才终止事件：LLM 仍不会被触发，但限流、内容安全、预处理已经跑过，其它非指令监听器也可能已被调用。
+
 ## 日志
 
 每次忽略都会输出一条 INFO：
@@ -121,7 +148,7 @@ git clone https://github.com/cyilin36/astrbot_plugin_command_guard.git
 - 仅覆盖通过 `CommandFilter` 与 `CommandGroupFilter` 注册的指令；正则触发、事件监听器与普通对话不视为指令。
 - 未被任何插件注册的指令无法识别，仍按 AstrBot 原有逻辑处理。
 - 群主、群管理员等平台身份不等同于 AstrBot 管理员；本插件只认 AstrBot 的 `admins_id`。
-- 关闭 `hard_silence` 后，被忽略的管理员专属指令仍可能收到 AstrBot 的权限提示。
+- 关闭 `hard_silence` 后，被忽略的管理员专属指令仍可能收到 AstrBot 的权限提示，裸指令组名也仍会收到「参数不足」提示。
 - 会话规则里 `ignore_non_admin` 采用「显式覆盖」语义：一旦给某个会话建了规则，该会话的这项设置就由这条规则决定。
 
 ## 许可

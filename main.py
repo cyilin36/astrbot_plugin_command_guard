@@ -14,7 +14,8 @@ AstrBot 日志中留下一条 INFO 记录（固定行为，不可关闭）。
 
 1. 静默过滤器注入：把守卫过滤器插到其它插件指令 handler 的 ``event_filters`` 最前面，
    使其在 AstrBot 的唤醒检查阶段就被跳过，连框架自带的「权限不足 / 参数不足」提示
-   也不会发出。
+   也不会发出；同时直接 ``stop_event()``，让管道在唤醒阶段结束后就跳出，后续阶段与
+   LLM 请求都不会执行。
 2. 高优先级兜底监听器：即使某个 handler 没有被注入，也能在消息事件阶段直接
    ``stop_event()``，避免指令执行与 LLM 请求。
 """
@@ -87,7 +88,10 @@ class GuardDecisionMixin:
 class GuardInjectFilter(GuardDecisionMixin, filter.CustomFilter):
     """注入到其它指令 handler 的静默过滤器。
 
-    判定为「应忽略」时返回 ``False``，让该 handler 在唤醒检查阶段就被跳过。
+    判定为「应忽略」时返回 ``False``，让该 handler 在唤醒检查阶段就被跳过；
+    同时直接 ``stop_event()``，让事件停在 ``WakingCheckStage``，不再进入后续的
+    限流、内容安全、预处理与 LLM 请求等环节，真正做到「检测到就空过」。
+
     任何异常都返回 ``True``，保证守卫自身的问题不会影响正常链路。
     """
 
@@ -100,9 +104,15 @@ class GuardInjectFilter(GuardDecisionMixin, filter.CustomFilter):
         except Exception as exc:  # 守卫自身异常绝不能影响正常链路
             logger.warning(f"{LOG_PREFIX} 注入过滤器判定异常，已放行: {exc}")
             return True
-        if decision is None:
+        if decision is None or not decision.ignored:
             return True
-        return not decision.ignored
+        # 在唤醒检查阶段就终止事件传播：管道调度器发现 is_stopped() 后会直接
+        # 跳出，后续阶段（含 LLM 请求）都不会执行。
+        try:
+            event.stop_event()
+        except Exception as exc:  # pragma: no cover - 极端情况下退回兜底层
+            logger.debug(f"{LOG_PREFIX} 提前终止事件失败，交由兜底监听器处理: {exc}")
+        return False
 
 
 class GuardTriggerFilter(GuardDecisionMixin, filter.CustomFilter):
