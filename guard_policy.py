@@ -4,37 +4,37 @@
 便于在没有 AstrBot 运行时的环境下直接做单元测试。
 
 术语：
-- 全局设置：插件配置里的 ``enabled`` / ``ignore_non_admin`` / ``ignored_commands`` 等；
+- 全局设置：插件配置里的 ``ignore_non_admin`` / ``ignored_commands`` /
+  ``exempt_commands`` / ``hard_silence``；
 - 会话规则：``session_rules`` 列表中的一项，按顺序匹配 UMO，首个命中生效；
-- 三态（tri）：``inherit`` 继承全局、``on`` 强制开启、``off`` 强制关闭；
-- 列表模式：``inherit`` 继承全局、``append`` 追加到全局之后、``replace`` 覆盖全局。
+  规则只在命中的会话内生效，不会影响其它会话；
+- 列表模式：``append`` 追加到全局之后、``replace`` 覆盖全局（没有 ``inherit``）。
+
+固定行为（不可配置）：管理员始终放行；机器人自身发出的事件始终放行；
+被忽略的指令始终记录一条日志。
 """
 
 from __future__ import annotations
 
 import fnmatch
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
-TRI_INHERIT = "inherit"
-TRI_ON = "on"
-TRI_OFF = "off"
-
-LIST_INHERIT = "inherit"
 LIST_APPEND = "append"
 LIST_REPLACE = "replace"
-LIST_VALUES = (LIST_INHERIT, LIST_APPEND, LIST_REPLACE)
+LIST_VALUES = (LIST_APPEND, LIST_REPLACE)
 
 DEFAULT_WAKE_PREFIXES: tuple[str, ...] = ("/",)
 
 _TRUE_TOKENS = frozenset({"on", "true", "1", "yes", "y", "enable", "enabled"})
 _FALSE_TOKENS = frozenset({"off", "false", "0", "no", "n", "disable", "disabled"})
+_INHERIT_TOKENS = frozenset({"", "inherit", "global", "default"})
 
 _WHITESPACE_RE = re.compile(r"\s+")
 
 # 判定原因（写日志时使用英文 token，便于 grep）
-REASON_DISABLED = "disabled"
+REASON_SESSION_OFF = "session_off"
 REASON_NOT_WOKEN = "not_woken"
 REASON_NOT_COMMAND = "not_command"
 REASON_ADMIN = "admin"
@@ -59,40 +59,30 @@ def _as_bool(value: Any, default: bool) -> bool:
     return default
 
 
-def _as_tri(value: Any, default: bool) -> bool:
-    """解析三态配置，返回最终生效的布尔值。"""
+def _as_optional_bool(value: Any) -> bool | None:
+    """解析会话级布尔：``None`` 表示「沿用全局」。
+
+    旧版本配置里的 ``inherit`` / 空值会被识别为 ``None``；新版本 WebUI 只会写
+    布尔值，因此新建的会话规则一定是「覆盖全局」。
+    """
     if isinstance(value, bool):
         return value
     if value is None:
-        return default
+        return None
     token = str(value).strip().lower()
-    if token in ("", TRI_INHERIT):
-        return default
+    if token in _INHERIT_TOKENS:
+        return None
     if token in _TRUE_TOKENS:
         return True
     if token in _FALSE_TOKENS:
         return False
-    return default
+    return None
 
 
-def _as_mode(value: Any, default: str = LIST_INHERIT) -> str:
+def _as_mode(value: Any, default: str = LIST_APPEND) -> str:
     """解析列表合并模式。"""
     token = str(value or "").strip().lower()
     return token if token in LIST_VALUES else default
-
-
-def _as_tri_token(value: Any) -> str:
-    """把三态配置解析成 inherit/on/off 之一。"""
-    if isinstance(value, bool):
-        return TRI_ON if value else TRI_OFF
-    token = str(value or "").strip().lower()
-    if token in ("", TRI_INHERIT):
-        return TRI_INHERIT
-    if token in _TRUE_TOKENS:
-        return TRI_ON
-    if token in _FALSE_TOKENS:
-        return TRI_OFF
-    return TRI_INHERIT
 
 
 def _as_str_list(value: Any) -> list[str]:
@@ -168,25 +158,28 @@ def _merge_lists(
     rule_items: Sequence[str],
     mode: str,
 ) -> tuple[str, ...]:
-    """按 inherit/append/replace 合并全局列表与会话列表。"""
+    """按 append/replace 合并全局列表与会话列表。
+
+    ``append`` 且会话列表为空时，结果就是全局列表（即「只用全局」）。
+    """
     if mode == LIST_REPLACE:
         return _dedupe(rule_items)
-    if mode == LIST_APPEND:
-        return _dedupe([*global_items, *rule_items])
-    return _dedupe(global_items)
+    return _dedupe([*global_items, *rule_items])
 
 
 @dataclass(frozen=True)
 class SessionRule:
-    """一条会话级规则。"""
+    """一条会话级规则，只对命中的 UMO 生效。"""
 
     pattern: str
     index: int
-    enabled: str = TRI_INHERIT
-    ignore_non_admin: str = TRI_INHERIT
-    ignored_mode: str = LIST_INHERIT
+    enabled: bool = True
+    ignore_non_admin: bool | None = None
+    """``None`` 表示沿用全局值；布尔值表示覆盖全局（仅本会话）。"""
+
+    ignored_mode: str = LIST_APPEND
     ignored_commands: tuple[str, ...] = ()
-    exempt_mode: str = LIST_INHERIT
+    exempt_mode: str = LIST_APPEND
     exempt_commands: tuple[str, ...] = ()
 
 
@@ -206,7 +199,7 @@ class Decision:
     def reason_text(self) -> str:
         """给日志用的中文原因描述。"""
         return {
-            REASON_DISABLED: "守卫未启用",
+            REASON_SESSION_OFF: "该会话已关闭守卫",
             REASON_NOT_WOKEN: "非唤醒消息",
             REASON_NOT_COMMAND: "不是指令",
             REASON_ADMIN: "管理员放行",
@@ -222,14 +215,9 @@ class Decision:
 class GuardPolicy:
     """插件配置解析后的策略快照。"""
 
-    enabled: bool = False
     ignore_non_admin: bool = False
     ignored_commands: tuple[str, ...] = ()
     exempt_commands: tuple[str, ...] = ()
-    admin_bypass: bool = True
-    extra_admins: frozenset[str] = field(default_factory=frozenset)
-    trust_bot_self: bool = True
-    log_ignored: bool = True
     hard_silence: bool = True
     rules: tuple[SessionRule, ...] = ()
     wake_prefixes: tuple[str, ...] = DEFAULT_WAKE_PREFIXES
@@ -256,25 +244,26 @@ class GuardPolicy:
                 for item in _as_str_list(config.get(key))
             )
 
-        extra_admins = frozenset(
-            item.strip() for item in _as_str_list(config.get("extra_admins")) if item.strip()
-        )
-
         rules: list[SessionRule] = []
         raw_rules = config.get("session_rules")
         if isinstance(raw_rules, list):
-            for position, item in enumerate(raw_rules):
+            for item in raw_rules:
                 if not isinstance(item, dict):
                     continue
-                pattern = str(item.get("umo", "") or "").strip()
+                # umo_custom 优先，便于为尚未出现在会话列表里的会话手填规则
+                pattern = str(
+                    item.get("umo_custom") or item.get("umo") or ""
+                ).strip()
                 if not pattern:
                     continue
                 rules.append(
                     SessionRule(
                         pattern=pattern,
                         index=len(rules),
-                        enabled=_as_tri_token(item.get("enabled")),
-                        ignore_non_admin=_as_tri_token(item.get("ignore_non_admin")),
+                        enabled=_as_bool(item.get("enabled"), True),
+                        ignore_non_admin=_as_optional_bool(
+                            item.get("ignore_non_admin")
+                        ),
                         ignored_mode=_as_mode(item.get("ignored_mode")),
                         ignored_commands=_dedupe(
                             normalize_command_entry(entry, prefixes)
@@ -289,14 +278,9 @@ class GuardPolicy:
                 )
 
         return cls(
-            enabled=_as_bool(config.get("enabled"), False),
             ignore_non_admin=_as_bool(config.get("ignore_non_admin"), False),
             ignored_commands=_entries("ignored_commands"),
             exempt_commands=_entries("exempt_commands"),
-            admin_bypass=_as_bool(config.get("admin_bypass"), True),
-            extra_admins=extra_admins,
-            trust_bot_self=_as_bool(config.get("trust_bot_self"), True),
-            log_ignored=_as_bool(config.get("log_ignored"), True),
             hard_silence=_as_bool(config.get("hard_silence"), True),
             rules=tuple(rules),
             wake_prefixes=prefixes,
@@ -333,15 +317,19 @@ class GuardPolicy:
         """判断某个会话最终是否启用守卫。"""
         rule = self.match_rule(umo)
         if rule is None:
-            return self.enabled
-        return _as_tri(rule.enabled, self.enabled)
+            return True
+        return rule.enabled
 
     def ignore_non_admin_for(self, umo: str) -> bool:
-        """判断某个会话最终是否忽略非管理员指令。"""
+        """判断某个会话最终是否忽略非管理员指令。
+
+        会话规则里显式设置了该开关时覆盖全局值（仅本会话生效）；
+        未设置（旧配置里的 ``inherit``）时沿用全局值。
+        """
         rule = self.match_rule(umo)
-        if rule is None:
+        if rule is None or rule.ignore_non_admin is None:
             return self.ignore_non_admin
-        return _as_tri(rule.ignore_non_admin, self.ignore_non_admin)
+        return rule.ignore_non_admin
 
     def effective_ignored(self, rule: SessionRule | None) -> tuple[str, ...]:
         """某个会话最终生效的忽略列表。"""
@@ -363,16 +351,6 @@ class GuardPolicy:
             rule.exempt_mode,
         )
 
-    def is_extra_admin(self, sender_id: str, platform_name: str = "") -> bool:
-        """判断发送者是否在额外管理员名单中（支持 ``UID`` 与 ``平台:UID``）。"""
-        sender = str(sender_id or "").strip()
-        if not sender or not self.extra_admins:
-            return False
-        if sender in self.extra_admins:
-            return True
-        platform = str(platform_name or "").strip()
-        return bool(platform) and f"{platform}:{sender}" in self.extra_admins
-
     # ---------------------------------------------------------------- 判定
 
     def resolve(
@@ -382,12 +360,11 @@ class GuardPolicy:
         matched_commands: Sequence[str],
         sender_id: str = "",
         self_id: str = "",
-        platform_name: str = "",
         is_admin: bool = False,
     ) -> Decision:
         """对“本次消息命中的指令”做最终判定。
 
-        优先级（从高到低）：未启用 → 管理员 → 机器人自身 → 放行名单 →
+        优先级（从高到低）：会话守卫关闭 → 管理员 → 机器人自身 → 放行名单 →
         忽略非管理员 → 忽略列表。
         """
         matched = tuple(name for name in matched_commands if name)
@@ -408,25 +385,21 @@ class GuardPolicy:
             )
 
         if not self.is_enabled_for(umo):
-            return _decision(False, REASON_DISABLED)
+            return _decision(False, REASON_SESSION_OFF)
 
-        admin_like = bool(is_admin) or self.is_extra_admin(sender_id, platform_name)
-        if self.admin_bypass and admin_like:
+        # 管理员始终放行：直接复用 AstrBot 自带的管理员身份，无需额外配置。
+        if is_admin:
             return _decision(False, REASON_ADMIN)
 
-        if (
-            self.trust_bot_self
-            and sender_id
-            and self_id
-            and str(sender_id) == str(self_id)
-        ):
+        # 机器人自身发出的事件始终放行，交由 AstrBot 自行处理。
+        if sender_id and self_id and str(sender_id) == str(self_id):
             return _decision(False, REASON_BOT_SELF)
 
         exempt_hit = match_command_entries(self.effective_exempt(rule), matched)
         if exempt_hit is not None:
             return _decision(False, REASON_EXEMPT, exempt_hit[0])
 
-        if self.ignore_non_admin_for(umo) and not admin_like:
+        if self.ignore_non_admin_for(umo):
             return _decision(True, REASON_NON_ADMIN)
 
         ignored_hit = match_command_entries(self.effective_ignored(rule), matched)

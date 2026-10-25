@@ -1,16 +1,10 @@
 {
-  "enabled": {
-    "description": "启用指令守卫",
-    "type": "bool",
-    "default": false,
-    "hint": "总开关，默认关闭。关闭时插件不改变任何现有行为；开启后才会按下面的规则忽略指令。",
-    "obvious_hint": true
-  },
   "ignore_non_admin": {
     "description": "忽略非管理员发出的指令",
     "type": "bool",
     "default": false,
-    "hint": "开启后，AstrBot 管理员（配置里的 admins_id 与下方「额外管理员」）以外的人发出的指令一律忽略；被忽略的指令不会执行、不会回复、也不会触发 LLM。"
+    "hint": "开启后，AstrBot 管理员（配置里的 admins_id）以外的人发出的指令一律忽略；被忽略的指令不会执行、不会回复、也不会触发 LLM。管理员始终放行，无需额外设置。",
+    "obvious_hint": true
   },
   "ignored_commands": {
     "description": "要忽略的指令",
@@ -23,102 +17,64 @@
     "description": "始终放行的指令",
     "type": "list",
     "default": [],
-    "hint": "优先级高于所有忽略规则，适合放行 帮助、sid 这类需要人人可用的指令。支持指令组前缀匹配。"
-  },
-  "admin_bypass": {
-    "description": "管理员始终不受忽略规则影响",
-    "type": "bool",
-    "default": true,
-    "hint": "开启时管理员发起的指令直接放行，不会因为「忽略指令」或「忽略非管理员」被拦。关闭后，忽略列表里的指令对管理员同样生效。"
-  },
-  "extra_admins": {
-    "description": "额外管理员",
-    "type": "list",
-    "default": [],
-    "hint": "除 AstrBot 全局管理员外，额外视为管理员的用户。填写 UID，或 平台名:UID（例如 aiocqhttp:123456）。可用 /sid 获取 UID。"
-  },
-  "trust_bot_self": {
-    "description": "放行机器人自身发出的事件",
-    "type": "bool",
-    "default": true,
-    "hint": "定时任务、主动触发等以机器人自身身份产生的事件通常不是用户在发指令，默认放行。"
+    "hint": "优先级最高，会压过「忽略非管理员」与「要忽略的指令」，适合放行 帮助、sid 这类需要人人可用的指令。支持指令组前缀匹配。"
   },
   "hard_silence": {
-    "description": "彻底静默（推荐开启）",
+    "description": "彻底静默",
     "type": "bool",
     "default": true,
-    "hint": "开启后会把守卫过滤器注入到其它插件的指令处理器最前面，连 AstrBot 自带的「权限不足」「参数不足」提示都不会发出。关闭时仅靠兜底监听器拦截，可能先看到框架提示。"
-  },
-  "log_ignored": {
-    "description": "在日志中记录被忽略的指令",
-    "type": "bool",
-    "default": true,
-    "hint": "被忽略时机器人不会回复任何消息，只在 AstrBot 日志里写入一条 INFO 记录（含 UMO、发送者、指令名、原因）。"
+    "hint": "开启后会把守卫过滤器注入到其它插件的指令处理器最前面，连 AstrBot 自带的「权限不足」「参数不足」提示都不会发出。关闭时仅靠兜底监听器拦截，可能先看到框架提示。",
+    "obvious_hint": true
   },
   "session_rules": {
-    "description": "会话（UMO）精细化规则",
+    "description": "会话（UMO）规则",
     "type": "template_list",
     "default": [],
-    "hint": "为指定会话单独设置规则，优先级高于上面的全局设置。多条规则按顺序匹配，第一条命中的生效。",
+    "hint": "为指定会话单独设置规则，只在该会话内生效。多条规则按顺序匹配，第一条命中的生效。",
     "templates": {
       "session_rule": {
         "name": "会话规则",
         "hint": "同一个 UMO 建议只配置一条规则。",
         "items": {
           "umo": {
-            "description": "UMO（会话标识）",
+            "description": "会话（UMO）",
             "type": "string",
             "default": "",
-            "hint": "例如 aiocqhttp:GroupMessage:123456。支持通配符 aiocqhttp:GroupMessage:*；只填数字（如 123456）则匹配 UMO 最后一段（群号/用户号）。",
+            "hint": "下拉列表来自 AstrBot 现有会话，无需手动填写；插件运行后会自动补齐，刷新本页即可看到最新会话。还没有任何会话记录时这里是普通输入框。",
             "obvious_hint": true
           },
-          "enabled": {
-            "description": "该会话是否启用守卫",
+          "umo_custom": {
+            "description": "手动填写 UMO（可选）",
             "type": "string",
-            "options": [
-              "inherit",
-              "on",
-              "off"
-            ],
-            "labels": [
-              "继承全局",
-              "强制开启",
-              "强制关闭"
-            ],
-            "default": "inherit",
-            "hint": "inherit 沿用全局总开关；on/off 强制覆盖。"
+            "default": "",
+            "hint": "仅当上面的下拉列表里找不到目标会话时使用，填写后会优先于下拉选择。支持通配符，例如 aiocqhttp:GroupMessage:*；只填数字（如 123456）则匹配群号/用户号。"
+          },
+          "enabled": {
+            "description": "启用该会话的守卫",
+            "type": "bool",
+            "default": true,
+            "hint": "关闭后本插件完全不处理这个会话，指令直接交给 AstrBot 本身。",
+            "obvious_hint": true
           },
           "ignore_non_admin": {
-            "description": "该会话是否忽略非管理员指令",
-            "type": "string",
-            "options": [
-              "inherit",
-              "on",
-              "off"
-            ],
-            "labels": [
-              "继承全局",
-              "强制开启",
-              "强制关闭"
-            ],
-            "default": "inherit",
-            "hint": "inherit 沿用全局设置；on/off 强制覆盖。"
+            "description": "该会话忽略非管理员指令",
+            "type": "bool",
+            "default": false,
+            "hint": "开启/关闭都会覆盖全局的同名设置，但仅在这个会话内生效。"
           },
           "ignored_mode": {
             "description": "忽略列表的处理方式",
             "type": "string",
             "options": [
-              "inherit",
               "append",
               "replace"
             ],
             "labels": [
-              "继承全局",
-              "追加到全局",
-              "覆盖全局"
+              "追加",
+              "覆写"
             ],
-            "default": "inherit",
-            "hint": "inherit 只用全局忽略列表；append 全局 + 本会话；replace 只用本会话列表。"
+            "default": "append",
+            "hint": "追加：全局 + 本会话（下面留空就等于只用全局）；覆写：只用本会话的列表。"
           },
           "ignored_commands": {
             "description": "该会话要忽略的指令",
@@ -130,17 +86,15 @@
             "description": "放行列表的处理方式",
             "type": "string",
             "options": [
-              "inherit",
               "append",
               "replace"
             ],
             "labels": [
-              "继承全局",
-              "追加到全局",
-              "覆盖全局"
+              "追加",
+              "覆写"
             ],
-            "default": "inherit",
-            "hint": "与忽略列表相同的三态语义。"
+            "default": "append",
+            "hint": "与忽略列表相同的合并语义。"
           },
           "exempt_commands": {
             "description": "该会话始终放行的指令",

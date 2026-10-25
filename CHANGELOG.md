@@ -1,5 +1,29 @@
 # 更新日志
 
+## 2.0.0
+
+精简配置面与操作方式，破坏性变更（旧配置项会被 AstrBot 自动清理）。
+
+**全局设置**
+
+- 移除总开关 `enabled`：插件常驻运行，默认配置下不拦截任何指令。
+- 移除 `admin_bypass`、`extra_admins`：管理员固定放行，直接复用 AstrBot 自带的 `admins_id`。
+- 移除 `trust_bot_self`：机器人自身事件固定放行。
+- 移除 `log_ignored`：每次忽略必然记录一条 INFO 日志。
+- `hard_silence` 保留，默认开启。
+
+**会话（UMO）规则**
+
+- UMO 改为下拉选择，选项自动取自 AstrBot 现有会话，无需手动填写；新增可选字段 `umo_custom` 供手动兜底。
+- `enabled`、`ignore_non_admin` 由三态（`inherit`/`on`/`off`）简化为纯开关，默认分别为 `true`、`false`。
+- 会话 `ignore_non_admin` 改为直接覆盖全局值（仅本会话生效）；旧配置里的 `inherit` 仍按「沿用全局」处理。
+- 列表合并去掉 `inherit` 档，只保留 `append`（默认，留空即只用全局）与 `replace`。
+
+**其它**
+
+- 配置指纹只跟踪影响判定的 5 个键，改配置后策略重建更轻量。
+- 启动日志与判定原因（新增 `session_off`）同步更新。
+
 ## 1.0.0
 
 首个版本。
