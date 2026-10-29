@@ -1,109 +1,29 @@
 {
   "ignore_non_admin": {
-    "description": "忽略非管理员发出的指令",
+    "description": "忽略非管理员发出的唤醒词",
     "type": "bool",
     "default": false,
-    "hint": "开启后，AstrBot 管理员（配置里的 admins_id）以外的人发出的指令一律忽略；被忽略的指令不会执行、不会回复、也不会触发 LLM。管理员始终放行，无需额外设置。",
+    "hint": "开启后，非管理员通过唤醒词（如 /）唤醒的消息整条忽略：不执行、不回复、不触发 LLM。直接 @bot、回复 bot 或私聊发来的消息不受这项影响，仍按「屏蔽指令」处理。管理员始终放行。",
     "obvious_hint": true
   },
   "ignored_commands": {
-    "description": "要忽略的指令",
+    "description": "屏蔽指令",
     "type": "list",
     "default": [],
-    "hint": "填写指令名，例如 帮助、群管。支持填指令组名（配置 群管 会同时命中 群管 禁言 等子指令），也可写完整路径 群管 禁言。可带 / 前缀，会自动去掉。",
+    "hint": "填写要屏蔽的指令词，例如 cr。非管理员通过唤醒词输入 /cr test，或直接 @bot 输入 cr test，整条消息都会被静默丢弃，不触发 LLM。只按完整词边界匹配：cr 会屏蔽 cr test，但不会屏蔽 crtest、crx、cr-test。支持指令组（填 cr 会命中 cr list）。管理员始终放行。若同时开启「忽略非管理员唤醒词」，/crtest 仍会因使用唤醒词被开关 1 拦截，这是两条独立规则。",
     "obvious_hint": true
   },
   "exempt_commands": {
     "description": "始终放行的指令",
     "type": "list",
     "default": [],
-    "hint": "优先级最高，会压过「忽略非管理员」与「要忽略的指令」，适合放行 帮助、sid 这类需要人人可用的指令。支持指令组前缀匹配。"
+    "hint": "优先级最高，会压过「忽略非管理员唤醒词」与「屏蔽指令」，适合放行 帮助、sid 这类需要人人可用的指令。匹配规则与「屏蔽指令」相同。"
   },
   "hard_silence": {
-    "description": "彻底静默",
+    "description": "静默处理",
     "type": "bool",
     "default": true,
-    "hint": "开启后会把守卫过滤器注入到其它插件的指令处理器最前面，连 AstrBot 自带的「权限不足」「参数不足」提示都不会发出。关闭时仅靠兜底监听器拦截，可能先看到框架提示。",
+    "hint": "默认开启。开启后会把守卫过滤器注入到其它插件的指令处理器最前面，拦截时连 AstrBot 自带的「权限不足」「参数不足」提示都不会发出。关闭后仅靠兜底监听器拦截，可能先看到框架提示。本插件在任何情况下都不会主动向用户发送消息。",
     "obvious_hint": true
-  },
-  "session_rules": {
-    "description": "会话（UMO）规则",
-    "type": "template_list",
-    "default": [],
-    "hint": "为指定会话单独设置规则，只在该会话内生效。多条规则按顺序匹配，第一条命中的生效。",
-    "templates": {
-      "session_rule": {
-        "name": "会话规则",
-        "hint": "同一个 UMO 建议只配置一条规则。",
-        "items": {
-          "umo": {
-            "description": "会话（UMO）",
-            "type": "string",
-            "default": "",
-            "hint": "下拉列表来自 AstrBot 现有会话，无需手动填写；插件运行后会自动补齐，刷新本页即可看到最新会话。还没有任何会话记录时这里是普通输入框。",
-            "obvious_hint": true
-          },
-          "umo_custom": {
-            "description": "手动填写 UMO（可选）",
-            "type": "string",
-            "default": "",
-            "hint": "仅当上面的下拉列表里找不到目标会话时使用，填写后会优先于下拉选择。支持通配符，例如 aiocqhttp:GroupMessage:*；只填数字（如 123456）则匹配群号/用户号。"
-          },
-          "enabled": {
-            "description": "启用该会话的守卫",
-            "type": "bool",
-            "default": true,
-            "hint": "关闭后本插件完全不处理这个会话，指令直接交给 AstrBot 本身。",
-            "obvious_hint": true
-          },
-          "ignore_non_admin": {
-            "description": "该会话忽略非管理员指令",
-            "type": "bool",
-            "default": false,
-            "hint": "开启/关闭都会覆盖全局的同名设置，但仅在这个会话内生效。"
-          },
-          "ignored_mode": {
-            "description": "忽略列表的处理方式",
-            "type": "string",
-            "options": [
-              "append",
-              "replace"
-            ],
-            "labels": [
-              "追加",
-              "覆写"
-            ],
-            "default": "append",
-            "hint": "追加：全局 + 本会话（下面留空就等于只用全局）；覆写：只用本会话的列表。"
-          },
-          "ignored_commands": {
-            "description": "该会话要忽略的指令",
-            "type": "list",
-            "default": [],
-            "hint": "配合「忽略列表的处理方式」使用；支持指令组前缀匹配。"
-          },
-          "exempt_mode": {
-            "description": "放行列表的处理方式",
-            "type": "string",
-            "options": [
-              "append",
-              "replace"
-            ],
-            "labels": [
-              "追加",
-              "覆写"
-            ],
-            "default": "append",
-            "hint": "与忽略列表相同的合并语义。"
-          },
-          "exempt_commands": {
-            "description": "该会话始终放行的指令",
-            "type": "list",
-            "default": [],
-            "hint": "该会话内始终放行的指令，优先级高于忽略规则。"
-          }
-        }
-      }
-    }
   }
 }

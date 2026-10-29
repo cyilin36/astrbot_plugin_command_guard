@@ -1,13 +1,13 @@
-"""从 AstrBot handler 中提取“本次消息命中的指令名”。
+"""事件解析工具：唤醒方式分类、匹配文本提取与指令 handler 识别。
 
-本模块只做 duck typing，不导入 astrbot：传入的 handler 只需要具备
-``event_filters`` / ``enabled`` 等属性即可。这样既方便单元测试，
-也让插件在 AstrBot 版本变动时更容易降级。
+本模块只做 duck typing，不导入 astrbot：传入的 event / handler 只需要具备
+``get_messages`` / ``message_obj`` / ``event_filters`` 等属性即可。这样既方便
+单元测试，也让插件在 AstrBot 版本变动时更容易降级。
 
-匹配语义与 AstrBot v4.25 的 ``CommandFilter`` / ``CommandGroupFilter`` 对齐：
-- 指令名取 ``get_complete_command_names()``，其中已包含别名与父指令组前缀，
-  并且 WebUI 改名后该方法会重算，因此守卫无需缓存指令名；
-- 消息侧先折叠空白，再判断“完全相等”或“以 ``指令名 + 空格`` 开头”。
+匹配语义与 AstrBot v4.25 的 ``WakingCheckStage`` 对齐：
+- 唤醒词路径由 ``wake_prefix`` 前缀触发，框架会改写 ``event.message_str``，
+  但 ``message_obj.message_str`` 仍保留原始文本，因此可以据此区分唤醒方式；
+- 直接 @bot / 回复 bot / 私聊不视为唤醒词，不受「忽略非管理员唤醒词」影响。
 """
 
 from __future__ import annotations
@@ -15,17 +15,22 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable
 
+try:  # 包内导入（AstrBot 运行时）
+    from .guard_policy import WAKE_DIRECT, WAKE_OTHER, WAKE_PREFIX, WAKE_PRIVATE
+except ImportError:  # 纯逻辑测试时以顶层模块导入
+    from guard_policy import WAKE_DIRECT, WAKE_OTHER, WAKE_PREFIX, WAKE_PRIVATE
+
 _WHITESPACE_RE = re.compile(r"\s+")
-
-
-def _filter_kind(event_filter: Any) -> str:
-    """返回过滤器类别名，避免直接依赖 astrbot 的类对象。"""
-    return type(event_filter).__name__
 
 
 def collapse_whitespace(text: str) -> str:
     """折叠连续空白，与 AstrBot 指令过滤器的归一化方式一致。"""
     return _WHITESPACE_RE.sub(" ", (text or "").strip())
+
+
+def _filter_kind(event_filter: Any) -> str:
+    """返回过滤器类别名，避免直接依赖 astrbot 的类对象。"""
+    return type(event_filter).__name__
 
 
 def _is_command_filter(event_filter: Any) -> bool:
@@ -88,55 +93,157 @@ def handler_command_names(handler: Any) -> list[str]:
 
 
 def is_handler_enabled(handler: Any) -> bool:
-    """handler 是否处于启用状态（禁用指令不参与守卫判定）。"""
+    """handler 是否处于启用状态（禁用 handler 不参与注入）。"""
     enabled = getattr(handler, "enabled", True)
     return bool(enabled)
 
 
-def match_message_commands(message_str: str, command_names: Iterable[str]) -> list[str]:
-    """返回本次消息命中的指令名列表（按传入顺序）。
-
-    命中条件：消息与指令名完全相等，或以 ``指令名 + 空格`` 开头。
-    因此 ``群管`` 会命中 ``群管 禁言``，而 ``帮助x`` 不会命中 ``帮助``。
-    """
-    text = collapse_whitespace(message_str)
-    if not text:
-        return []
-    matched: list[str] = []
-    for name in command_names:
-        normalized = collapse_whitespace(name)
-        if not normalized:
-            continue
-        if text == normalized or text.startswith(normalized + " "):
-            matched.append(normalized)
-    return matched
+# ---------------------------------------------------------------- 唤醒方式
 
 
-def matched_commands_for_event(
-    event: Any,
-    handlers: Iterable[Any],
-) -> list[str]:
-    """遍历 handlers，返回本次消息命中的全部指令名（去重、保持顺序）。"""
-    message_str = ""
-    getter = getattr(event, "get_message_str", None)
+def _safe_getattr(obj: Any, name: str, default: Any = None) -> Any:
+    """容错的 getattr：事件对象异常时返回默认值，而不是把守卫自己炸掉。"""
+    try:
+        return getattr(obj, name, default)
+    except Exception:
+        return default
+
+
+def _get_messages(event: Any) -> list[Any]:
+    """取出消息链，兼容 ``get_messages()`` 与 ``message_obj.message``。"""
+    getter = _safe_getattr(event, "get_messages", None)
     if callable(getter):
         try:
-            message_str = str(getter() or "")
+            messages = getter()
         except Exception:
-            message_str = ""
-    if not message_str:
-        message_str = str(getattr(event, "message_str", "") or "")
+            messages = None
+        if isinstance(messages, Iterable) and not isinstance(messages, (str, bytes)):
+            return list(messages)
+    obj = _safe_getattr(event, "message_obj", None)
+    messages = _safe_getattr(obj, "message", None)
+    if isinstance(messages, Iterable) and not isinstance(messages, (str, bytes)):
+        return list(messages)
+    return []
 
-    matched: list[str] = []
-    seen: set[str] = set()
-    for handler in handlers:
-        if not is_handler_enabled(handler):
-            continue
-        names = handler_command_names(handler)
-        if not names:
-            continue
-        for name in match_message_commands(message_str, names):
-            if name not in seen:
-                seen.add(name)
-                matched.append(name)
-    return matched
+
+def _component_kind(component: Any) -> str:
+    """返回消息段类别名，避免直接依赖 astrbot 的类对象。"""
+    return type(component).__name__
+
+
+def _get_self_id(event: Any) -> str:
+    getter = _safe_getattr(event, "get_self_id", None)
+    if callable(getter):
+        try:
+            return str(getter() or "")
+        except Exception:
+            return ""
+    return ""
+
+
+def _is_private_chat(event: Any) -> bool:
+    getter = _safe_getattr(event, "is_private_chat", None)
+    if callable(getter):
+        try:
+            return bool(getter())
+        except Exception:
+            return False
+    return False
+
+
+def _raw_message_str(event: Any) -> str:
+    """取唤醒检查前的原始文本（保留唤醒前缀）。
+
+    AstrBot 的 ``WakingCheckStage`` 只会改写 ``event.message_str``，不会动
+    ``message_obj.message_str``，因此后者可以可靠地区分「唤醒词」与「@bot」。
+    """
+    obj = _safe_getattr(event, "message_obj", None)
+    if obj is not None:
+        raw = _safe_getattr(obj, "message_str", None)
+        if isinstance(raw, str) and raw:
+            return raw
+    raw = _safe_getattr(event, "message_str", "")
+    return raw if isinstance(raw, str) else ""
+
+
+def classify_wake_kind(
+    event: Any,
+    wake_prefixes: Iterable[str] = ("/",),
+) -> str:
+    """判断本次已唤醒事件的唤醒方式。
+
+    - ``direct``：At 自己或 Reply 自己（直接 @bot / 回复 bot）；
+    - ``private``：私聊；
+    - ``prefix``：原始消息以唤醒前缀开头；
+    - ``other``：其余已唤醒消息（@全体、平台默认唤醒等）。
+    """
+    self_id = _get_self_id(event)
+    for component in _get_messages(event):
+        kind = _component_kind(component)
+        if kind in ("At", "AtAll"):
+            if self_id and str(getattr(component, "qq", "")) == self_id:
+                return WAKE_DIRECT
+        elif kind == "Reply":
+            if self_id and str(getattr(component, "sender_id", "")) == self_id:
+                return WAKE_DIRECT
+
+    if _is_private_chat(event):
+        return WAKE_PRIVATE
+
+    raw = _raw_message_str(event).lstrip()
+    if raw:
+        prefixes = [
+            prefix
+            for prefix in (wake_prefixes or ())
+            if isinstance(prefix, str) and prefix
+        ]
+        if any(raw.startswith(prefix) for prefix in prefixes):
+            return WAKE_PREFIX
+
+    return WAKE_OTHER
+
+
+# -------------------------------------------------------------- 匹配文本
+
+
+def message_text_for_matching(event: Any) -> str:
+    """提取用于屏蔽词匹配的文本。
+
+    优先拼接消息链里的 ``Plain`` 文本段：AstrBot 的 ``message_str`` 会包含
+    ``@其他用户`` 占位符，直接用它做前缀匹配会被「先 @ 别人再 @bot」绕过。
+    没有 Plain 文本段时回退到 ``get_message_str()``，再回退到 ``message_str``
+    属性；任何异常都静默回退。
+    """
+    parts: list[str] = []
+    try:
+        for component in _get_messages(event):
+            if _component_kind(component) != "Plain":
+                continue
+            text = _safe_getattr(component, "text", "")
+            if isinstance(text, str):
+                parts.append(text)
+    except Exception:
+        parts = []
+    if parts and any(part.strip() for part in parts):
+        return "".join(parts)
+
+    getter = _safe_getattr(event, "get_message_str", None)
+    if callable(getter):
+        try:
+            text = getter()
+        except Exception:
+            text = ""
+        if isinstance(text, str) and text:
+            return text
+
+    text = _safe_getattr(event, "message_str", "")
+    return text if isinstance(text, str) else ""
+
+
+__all__ = [
+    "classify_wake_kind",
+    "collapse_whitespace",
+    "handler_command_names",
+    "is_handler_enabled",
+    "message_text_for_matching",
+]

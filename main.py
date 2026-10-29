@@ -1,14 +1,20 @@
 """AstrBot 指令守卫插件。
 
-按全局设置 + 会话（UMO）规则，忽略指定的指令，以及非管理员发出的指令。
-被忽略的指令不会被执行、不会产生任何回复，也不会触发 LLM 请求；每次忽略都会在
+按全局设置，屏蔽非管理员的唤醒词消息与指定指令：
+被屏蔽的消息不会被执行、不会产生任何回复，也不会触发 LLM 请求；每次屏蔽都会在
 AstrBot 日志中留下一条 INFO 记录（固定行为，不可关闭）。
+
+屏蔽方式：
+
+- 「忽略非管理员唤醒词」只拦截通过 ``wake_prefix`` 唤醒的消息；直接 @bot、
+  回复 bot、私聊不受影响；
+- 「屏蔽指令」按消息文本前缀匹配，唤醒词与直接 @bot 两条路径都生效。
 
 固定行为（无需配置）：
 
 - 管理员始终放行，直接复用 AstrBot 自带的 ``admins_id`` 身份；
 - 机器人自身发出的事件始终放行，交给 AstrBot 自行处理；
-- 每次忽略都记录日志。
+- 每次屏蔽都记录日志。
 
 实现分为两层（详见 README）：
 
@@ -31,9 +37,13 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
 
-from .guard_commands import handler_command_names, matched_commands_for_event
+from .guard_commands import (
+    classify_wake_kind,
+    handler_command_names,
+    is_handler_enabled,
+    message_text_for_matching,
+)
 from .guard_policy import (
-    REASON_NOT_COMMAND,
     REASON_NOT_WOKEN,
     Decision,
     GuardPolicy,
@@ -55,12 +65,7 @@ POLICY_KEYS = (
     "ignored_commands",
     "exempt_commands",
     "hard_silence",
-    "session_rules",
 )
-
-# UMO 下拉选项的来源：AstrBot 会话表分页读取的上限，避免启动时拖慢。
-UMO_PAGE_SIZE = 500
-UMO_MAX_PAGES = 10
 
 
 class GuardDecisionMixin:
@@ -131,7 +136,7 @@ class GuardTriggerFilter(GuardDecisionMixin, filter.CustomFilter):
 
 
 class CommandGuardPlugin(Star):
-    """指令守卫：全局设置 + 会话（UMO）规则，忽略指定指令与非管理员指令。"""
+    """指令守卫：全局屏蔽非管理员唤醒词与指定指令。"""
 
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
@@ -141,23 +146,16 @@ class CommandGuardPlugin(Star):
         self._command_handlers: list = []
         self._installed_hard_silence: bool | None = None
         self._reinstall_task: asyncio.Task | None = None
-        self._known_umos: set[str] = set()
-        """运行时见过的 UMO，用于把会话规则里的 UMO 字段渲染成下拉选项。"""
-        self._umos_loaded = False
-        """是否已从会话表读取过历史 UMO（只扫一次，失败则下次重试）。"""
 
         GuardInjectFilter.plugin = self
         GuardTriggerFilter.plugin = self
 
-        # 先把已保存的 UMO 塞进选项，保证配置弹窗一打开就能显示当前值
-        self._refresh_umo_options()
-
         policy = self.get_policy()
         logger.info(
             f"{LOG_PREFIX} {PLUGIN_NAME} 已加载 | "
-            f"忽略非管理员={'开' if policy.ignore_non_admin else '关'} "
-            f"忽略指令={len(policy.ignored_commands)} 放行指令={len(policy.exempt_commands)} "
-            f"会话规则={len(policy.rules)} 静默={'开' if policy.hard_silence else '关'}"
+            f"忽略非管理员唤醒词={'开' if policy.ignore_non_admin else '关'} "
+            f"屏蔽指令={len(policy.ignored_commands)} 放行指令={len(policy.exempt_commands)} "
+            f"静默处理={'开' if policy.hard_silence else '关'}"
         )
 
     # ------------------------------------------------------------------ 配置
@@ -191,13 +189,11 @@ class CommandGuardPlugin(Star):
         if self._policy is None or fingerprint != self._policy_fingerprint:
             self._policy = GuardPolicy.from_config(self.config, self._wake_prefixes())
             self._policy_fingerprint = fingerprint
-            # 新保存的会话规则里可能带了手填 UMO，顺手补进下拉选项
-            self._refresh_umo_options()
             self._schedule_reinstall_if_needed()
         return self._policy
 
     def _schedule_reinstall_if_needed(self) -> None:
-        """「彻底静默」开关被改动时，安排一次重新注入。
+        """「静默处理」开关被改动时，安排一次重新注入。
 
         不在判定过程中同步改 ``event_filters``：当前消息可能正在被框架遍历，
         改成异步任务可确保在下一个事件循环周期里安全生效。
@@ -224,106 +220,22 @@ class CommandGuardPlugin(Star):
         except Exception as exc:  # pragma: no cover - 兜底
             logger.warning(f"{LOG_PREFIX} 重新注入过滤器失败: {exc}")
 
-    # -------------------------------------------------------------- UMO 选项
-
-    def _configured_umos(self) -> set[str]:
-        """已保存在会话规则里的 UMO（含手填值），保证旧配置仍显示在选项里。"""
-        umos: set[str] = set()
-        raw_rules = self.config.get("session_rules") if isinstance(self.config, dict) else None
-        if not isinstance(raw_rules, list):
-            return umos
-        for item in raw_rules:
-            if not isinstance(item, dict):
-                continue
-            for key in ("umo", "umo_custom"):
-                value = item.get(key)
-                if isinstance(value, str) and value.strip():
-                    umos.add(value.strip())
-        return umos
-
-    def _refresh_umo_options(self) -> None:
-        """把已知 UMO 写进 ``session_rules`` 模板里 ``umo`` 字段的 options。
-
-        只改内存中的 schema（``/api/config/get`` 每次都返回该对象），不做任何 IO；
-        任何异常都静默降级，最多让下拉框少几项，不影响拦截逻辑。
-        """
-        try:
-            schema = getattr(self.config, "schema", None)
-            if not isinstance(schema, dict):
-                return
-            session_meta = schema.get("session_rules")
-            if not isinstance(session_meta, dict):
-                return
-            templates = session_meta.get("templates")
-            if not isinstance(templates, dict):
-                return
-            template = templates.get("session_rule")
-            if not isinstance(template, dict):
-                return
-            items = template.get("items")
-            if not isinstance(items, dict):
-                return
-            umo_meta = items.get("umo")
-            if not isinstance(umo_meta, dict):
-                return
-            # WebUI 用 ``options`` 是否存在来切换下拉/输入框，而空列表在前端是真值，
-            # 会渲染成一个选不了任何东西的空下拉。因此只在有选项时才写入。
-            options = sorted(self._known_umos | self._configured_umos())
-            if options:
-                if umo_meta.get("options") != options:
-                    umo_meta["options"] = options
-            elif "options" in umo_meta:
-                umo_meta.pop("options", None)
-        except Exception as exc:  # 纯展示功能，失败不影响判定
-            logger.debug(f"{LOG_PREFIX} 刷新 UMO 下拉选项失败: {exc}")
-
-    async def _load_umos_from_db(self) -> None:
-        """从 AstrBot 会话表读取历史 UMO，供会话规则下拉选择。"""
-        if self._umos_loaded:
-            return
-        try:
-            manager = getattr(self.context, "conversation_manager", None)
-            getter = getattr(manager, "get_filtered_conversations", None)
-            if not callable(getter):
-                return
-            seen = 0
-            for page in range(1, UMO_MAX_PAGES + 1):
-                conversations, total = await getter(page=page, page_size=UMO_PAGE_SIZE)
-                if not conversations:
-                    break
-                for conversation in conversations:
-                    umo = getattr(conversation, "user_id", "") or ""
-                    if umo:
-                        self._known_umos.add(str(umo))
-                seen += len(conversations)
-                if seen >= int(total or 0):
-                    break
-            self._umos_loaded = True
-            self._refresh_umo_options()
-        except Exception as exc:
-            logger.debug(f"{LOG_PREFIX} 读取会话列表失败，UMO 下拉可能不全: {exc}")
-
-    def _note_umo(self, umo: str) -> None:
-        """记录运行时见到的 UMO，新会话也能立刻出现在下拉框里。"""
-        if not umo or umo in self._known_umos:
-            return
-        self._known_umos.add(umo)
-        self._refresh_umo_options()
-
     # -------------------------------------------------------------- 判定入口
 
-    def _is_woken_command(self, event: AstrMessageEvent) -> bool:
-        """只有「被唤醒且以指令形式触发」的消息才进入守卫判定。"""
+    def _is_woken_message(self, event: AstrMessageEvent) -> bool:
+        """只有被 AstrBot 唤醒的消息才进入守卫判定。"""
         return bool(getattr(event, "is_at_or_wake_command", False))
 
     def _candidate_handlers(self) -> list:
-        """当前注册表中所有指令 handler（排除本插件自身）。"""
+        """当前注册表中所有指令 handler（排除本插件自身与已禁用项）。"""
         own_module = __name__
         handlers: list = []
         for handler in star_handlers_registry:
             if getattr(handler, "event_type", None) != EventType.AdapterMessageEvent:
                 continue
             if getattr(handler, "handler_module_path", None) == own_module:
+                continue
+            if not is_handler_enabled(handler):
                 continue
             if not handler_command_names(handler):
                 continue
@@ -337,19 +249,9 @@ class CommandGuardPlugin(Star):
             return cached
 
         policy = self.get_policy()
-        umo = str(getattr(event, "unified_msg_origin", "") or "")
-        self._note_umo(umo)
 
-        if not self._is_woken_command(event):
+        if not self._is_woken_message(event):
             decision = Decision(ignored=False, reason=REASON_NOT_WOKEN)
-            event.set_extra(DECISION_EXTRA_KEY, decision)
-            return decision
-
-        if not self._command_handlers:
-            self._command_handlers = self._candidate_handlers()
-        matched = matched_commands_for_event(event, self._command_handlers)
-        if not matched:
-            decision = Decision(ignored=False, reason=REASON_NOT_COMMAND)
             event.set_extra(DECISION_EXTRA_KEY, decision)
             return decision
 
@@ -368,8 +270,8 @@ class CommandGuardPlugin(Star):
             is_admin = False
 
         decision = policy.resolve(
-            umo=umo,
-            matched_commands=matched,
+            message_text=message_text_for_matching(event),
+            wake_kind=classify_wake_kind(event, policy.wake_prefixes),
             sender_id=sender_id,
             self_id=self_id,
             is_admin=is_admin,
@@ -385,18 +287,15 @@ class CommandGuardPlugin(Star):
             return
         event.set_extra(LOGGED_EXTRA_KEY, True)
 
-        umo = str(getattr(event, "unified_msg_origin", "") or "")
         try:
             sender = f"{event.get_sender_name()}/{event.get_sender_id()}"
         except Exception:
             sender = "unknown"
-        scope = "global"
-        if decision.scope == "session" and decision.rule_index is not None:
-            scope = f"session(rule#{decision.rule_index + 1})"
         logger.info(
-            f"{LOG_PREFIX} 已忽略 | umo={umo} sender={sender} "
-            f"cmd={decision.command or '-'} reason={decision.reason}({decision.reason_text}) "
-            f"scope={scope} matched={list(decision.matched)}"
+            f"{LOG_PREFIX} 已忽略 | sender={sender} "
+            f"wake={decision.wake_kind or '-'} cmd={decision.command or '-'} "
+            f"reason={decision.reason}({decision.reason_text}) "
+            f"entry={decision.entry or '-'}"
         )
 
     # -------------------------------------------------------------- 兜底监听
@@ -456,7 +355,7 @@ class CommandGuardPlugin(Star):
         self._installed_hard_silence = policy.hard_silence
         logger.info(
             f"{LOG_PREFIX} 静默过滤器已就绪（{reason}）| 指令 handler={len(self._command_handlers)} "
-            f"已注入={injected} 静默={'开' if policy.hard_silence else '关'}"
+            f"已注入={injected} 静默处理={'开' if policy.hard_silence else '关'}"
         )
         return injected
 
@@ -476,14 +375,9 @@ class CommandGuardPlugin(Star):
 
     # -------------------------------------------------------------- 生命周期
 
-    async def initialize(self):
-        """AstrBot 实例化插件后调用：补齐 UMO 下拉选项。"""
-        await self._load_umos_from_db()
-
     @filter.on_astrbot_loaded()
     async def on_astrbot_loaded(self):
         """AstrBot 加载完成后统一注入，覆盖先前加载的所有插件。"""
-        await self._load_umos_from_db()
         self.install("astrbot_loaded")
 
     @filter.on_plugin_loaded()

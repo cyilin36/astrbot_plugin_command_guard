@@ -1,5 +1,26 @@
 # 更新日志
 
+## 3.0.0-beta1
+
+全局访问控制改版，破坏性变更。
+
+**行为**
+
+- `ignore_non_admin` 的语义从「忽略非管理员的所有指令」改为「忽略非管理员发出的唤醒词消息」；直接 @bot、回复 bot、私聊不再受该开关影响，仍可正常交给 AstrBot。
+- `ignored_commands` 改为按消息文本完整词边界匹配，唤醒词与直接 @bot 两条路径都生效；不再要求对应指令已注册。填 `cr` 会屏蔽 `cr test`，但不会屏蔽 `crtest`、`crx`、`cr-test`。
+- 新增唤醒方式识别：`direct`（@bot / 回复 bot）、`prefix`（唤醒词）、`private`（私聊）、`other`（@全体等），只有 `prefix` 受唤醒词开关影响。
+- 管理员与机器人自身事件始终放行；`exempt_commands` 仍是最高优先级的非管理员放行名单。
+
+**配置**
+
+- 移除全部会话（UMO）规则、UMO 下拉与 `session_rules` 配置项；插件只保留全局配置。
+- 保留 `ignore_non_admin`、`ignored_commands`、`exempt_commands`、`hard_silence` 四个键，避免旧配置值丢失。
+- `hard_silence` 的 WebUI 文案改为「静默处理」，默认值仍为 `true`。
+
+**日志**
+
+- 日志增加 `wake=` 与 `entry=` 字段，屏蔽原因改为 `blocked_command` / `non_admin_wake`。
+
 ## 2.0.1
 
 - 命中即终止：注入过滤器判定为忽略时会同时 `stop_event()`，事件在唤醒检查阶段就被终止，不再进入限流、内容安全、预处理等后续阶段。此前单靠注入只能跳过指令 handler，消息仍会继续走到 LLM。
