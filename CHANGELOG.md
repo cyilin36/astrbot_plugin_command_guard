@@ -1,5 +1,27 @@
 # 更新日志
 
+## 3.0.0-beta2
+
+按 UMO 细化的规则回归，语义与 2.x 不同。
+
+**行为**
+
+- 新增 `umo_rules` 配置：按 `event.unified_msg_origin` 精确匹配会话。
+- 命中条目后**完全覆盖**全局设置，只使用条目里的 `ignore_non_admin` / `ignored_commands` / `exempt_commands` / `hard_silence`；没有继承、追加、合并或 `append`/`replace` 模式。
+- 条目可用 `enabled=false` 整体关闭该会话的守卫。
+- 管理员、机器人自身事件仍固定放行；`exempt_commands` 在条目内仍然是最高优先级的放行项。
+- 静默处理支持按条目覆盖：只要全局或任一启用条目需要静默就注入过滤器，具体事件按自己的设置决定是否在唤醒阶段提前终止。
+
+**配置**
+
+- `umo` 字段为下拉选择，选项来自 AstrBot 已有会话（会话表 + UMO 别名），插件启动时加载、运行时遇到新 UMO 自动补充；列表为空时退回手动输入。
+- 新建条目会自动复制当前全局设置（`ignore_non_admin`、`ignored_commands`、`exempt_commands`、`hard_silence`），方便针对该 UMO 微调。
+- 旧 2.x 的 `session_rules` 不读取、不迁移；如仍需要，请在新的 `umo_rules` 中重建。
+
+**日志**
+
+- 日志增加 `umo=`、`scope=global|session`、`rule=#N`，便于确认命中的是全局还是某个 UMO 条目。
+
 ## 3.0.0-beta1
 
 全局访问控制改版，破坏性变更。

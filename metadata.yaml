@@ -1,8 +1,8 @@
 name: astrbot_plugin_command_guard
 display_name: 指令守卫
-short_desc: 全局屏蔽非管理员的唤醒词与指定指令，管理员不受限制，命中时静默丢弃。
-desc: 为 AstrBot 提供全局访问控制：可忽略非管理员的唤醒词消息，也可按消息文本屏蔽指定指令；唤醒词与直接 @bot 两条路径都生效。被屏蔽的消息不会执行、不会回复，也不会触发 LLM，仅在日志中留下一条记录。管理员与机器人自身事件始终放行。
-version: 3.0.0-beta1
+short_desc: 全局屏蔽非管理员的唤醒词与指定指令，并可按 UMO 完全覆盖全局设置。
+desc: 为 AstrBot 提供访问控制：可全局忽略非管理员的唤醒词消息、按消息文本屏蔽指定指令；也可为指定 UMO 单独配置规则，命中后完全覆盖全局设置。唤醒词与直接 @bot 两条路径都生效。被屏蔽的消息不会执行、不会回复，也不会触发 LLM，仅在日志中留下一条记录。管理员与机器人自身事件始终放行。
+version: 3.0.0-beta2
 author: cyilin
 repo: https://github.com/cyilin36/astrbot_plugin_command_guard
 astrbot_version: ">=4.25.0"

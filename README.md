@@ -1,9 +1,12 @@
 # AstrBot 指令守卫插件
 
-`astrbot_plugin_command_guard` 是 AstrBot 的全局访问控制插件。它按全局设置屏蔽
+`astrbot_plugin_command_guard` 是 AstrBot 的访问控制插件。它按全局设置屏蔽
 
 - 非管理员通过**唤醒词**（AstrBot 的 `wake_prefix`，如 `/`）唤醒的消息；
 - 非管理员发出的、命中**屏蔽指令**的消息，无论来自唤醒词还是直接 `@bot`。
+
+同时支持为指定 **UMO** 单独配置规则：命中 UMO 条目后，该会话完全按条目执行，
+不再使用全局设置。
 
 被屏蔽的消息不会执行、不会产生回复，也不会触发 LLM 请求，仅在日志中记录一条信息。管理员始终不受限制。
 
@@ -11,16 +14,19 @@
 
 - 全局忽略非管理员唤醒词：只拦截唤醒词路径；非管理员直接 `@bot`、回复 bot、私聊发来的消息仍正常处理。
 - 全局屏蔽指令：按消息文本完整词边界匹配，唤醒词与直接 `@bot` 两条路径都生效。填 `cr` 会屏蔽 `cr test`，但不会误伤 `crtest`。
+- 按 UMO 完全覆盖：精确命中条目的会话只使用条目里的四项设置，不与全局合并，也没有继承或追加模式。
+- 新建 UMO 条目自动复制当前全局设置，方便针对该会话微调。
+- `umo` 为下拉选择，选项来自 AstrBot 已有会话，不用手动拼写 UMO。
 - 静默处理默认开启：命中后不向用户发送任何提示，连 AstrBot 自带的「权限不足」「参数不足」提示也不会发出，只在日志中留下一条 INFO。
 - 管理员始终放行，直接复用 AstrBot 自带的 `admins_id`，不需要额外配置。
 - 机器人自身发出的事件始终放行，交由 AstrBot 自行处理。
-- 全局配置，没有会话（UMO）规则，也没有总开关。
+- 没有总开关；默认配置下两个清单为空、忽略非管理员唤醒词关闭，因此不会拦截任何内容。
 - 屏蔽词不要求对应指令已注册：即使 `cr` 只是普通文本，只要消息被唤醒，也会被拦下。
 
 ## 环境要求
 
 - AstrBot 4.25.0 及以上版本。
-- 无第三方依赖。
+- 无第三方依赖（UMO 会话表读取使用 AstrBot 自带的数据库依赖，失败时会自动降级）。
 
 ## 安装
 
@@ -35,9 +41,9 @@ git clone https://github.com/cyilin36/astrbot_plugin_command_guard.git
 
 ## 配置
 
-插件常驻运行，没有总开关。默认配置下两个清单为空、忽略非管理员唤醒词关闭，因此不会拦截任何内容。
+插件常驻运行，没有总开关。
 
-本版本已移除会话（UMO）规则；旧配置里的 `session_rules` 会被 AstrBot 按 schema 自动清理，其余四个键和值保留。
+### 全局配置
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
@@ -46,45 +52,87 @@ git clone https://github.com/cyilin36/astrbot_plugin_command_guard.git
 | `exempt_commands` | list | `[]` | 始终放行的指令，优先级最高，会压过唤醒词开关与屏蔽清单。 |
 | `hard_silence` | bool | `true` | 静默处理。开启后拦截时不产生任何框架提示；关闭后仅靠兜底监听器拦截，框架提示可能出现。 |
 
+以上四项只在**没有命中 UMO 规则**时生效。命中 UMO 条目后，使用条目里的同名设置。
+
+### UMO 规则
+
+`umo_rules` 是一个条目列表，每一项包含：
+
+| 字段 | 类型 | 默认值 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `umo` | string | `""` | 会话 UMO，必须与 `event.unified_msg_origin` 完全相等。WebUI 中为下拉选择。 |
+| `enabled` | bool | `true` | 关闭后本插件完全不处理该会话，消息直接交给 AstrBot。 |
+| `ignore_non_admin` | bool | `false` | 该 UMO 自己的唤醒词开关，完全覆盖全局。 |
+| `ignored_commands` | list | `[]` | 该 UMO 自己的屏蔽列表，完全覆盖全局，不追加。 |
+| `exempt_commands` | list | `[]` | 该 UMO 自己的放行列表，完全覆盖全局，不追加。 |
+| `hard_silence` | bool | `true` | 该 UMO 自己的静默处理设置，完全覆盖全局。 |
+
+使用要点：
+
+1. **完全覆盖**：只要精确命中条目，就不再读取全局的四个同名设置，也不存在 `append`、`replace`、`inherit` 之类的合并逻辑。条目留空列表就是「该会话不屏蔽/不放行任何项」。
+2. **新建即复制**：在 WebUI 点「添加条目」时，四个设置会自动带出当前已保存的全局值。若刚改过全局配置，请先保存，再新建条目；配置页可能需要刷新。
+3. **下拉来源**：插件启动时从 AstrBot 已有会话（会话表 + UMO 别名）读取候选；运行时遇到新 UMO 也会自动补进候选。配置页刷新后即可在下拉里选到。候选为空时 `umo` 会退回普通输入框。
+4. **精确匹配**：`aiocqhttp:GroupMessage:123456` 不会匹配 `aiocqhttp:GroupMessage:1234560`，也不支持通配符。同一 UMO 配了多条时，从上到下第一条生效。
+5. **旧规则不迁移**：2.x 的 `session_rules` 与 `append`/`replace` 模式不再读取；如仍需要，请在新的 `umo_rules` 里重建。
+
 ### 配置示例
 
-屏蔽非管理员唤醒词，只放行 `sid`，同时屏蔽 `cr` 指令（含直接 @bot）：
+全局屏蔽 `cr`、忽略非管理员唤醒词，但给一个群开小灶：该群放行 `cr`、不忽略唤醒词。
 
 ```json
 {
   "ignore_non_admin": true,
   "ignored_commands": ["cr"],
-  "exempt_commands": ["sid"]
+  "exempt_commands": ["sid"],
+  "hard_silence": true,
+  "umo_rules": [
+    {
+      "__template_key": "umo_rule",
+      "umo": "aiocqhttp:GroupMessage:123456",
+      "enabled": true,
+      "ignore_non_admin": false,
+      "ignored_commands": [],
+      "exempt_commands": [],
+      "hard_silence": true
+    }
+  ]
 }
 ```
 
-效果：
+`__template_key` 由 WebUI 添加，手工编辑配置时保留即可。
 
-| 消息 | 发送者 | 结果 |
-| :--- | :--- | :--- |
-| `/sid` | 非管理员 | 放行（命中放行名单） |
-| `/hello` | 非管理员 | 屏蔽（唤醒词开关） |
-| `/cr test` | 非管理员 | 屏蔽（屏蔽指令） |
-| `@bot cr test` | 非管理员 | 屏蔽（屏蔽指令） |
-| `@bot crtest` | 非管理员 | 放行 |
-| `@bot 抽卡` | 非管理员 | 放行 |
-| 任意消息 | 管理员 | 放行 |
+效果（UMO A 为 `aiocqhttp:GroupMessage:123456`）：
+
+| 消息 | 会话 | 发送者 | 结果 |
+| :--- | :--- | :--- | :--- |
+| `/cr test` | UMO A | 非管理员 | 放行（条目屏蔽列表为空） |
+| `@bot cr test` | UMO A | 非管理员 | 放行（条目屏蔽列表为空） |
+| `/hello` | UMO A | 非管理员 | 放行（条目关闭唤醒词开关） |
+| `/sid` | 其它会话 | 非管理员 | 放行（全局放行名单） |
+| `/cr test` | 其它会话 | 非管理员 | 屏蔽（全局屏蔽列表） |
+| `/hello` | 其它会话 | 非管理员 | 屏蔽（全局唤醒词开关） |
+| 任意消息 | 任意会话 | 管理员 | 放行 |
 
 ## 判定顺序
 
 ```
-非唤醒消息                            → 放行
-管理员                               → 放行
-机器人自身事件                        → 放行
-命中放行名单                          → 放行
-命中屏蔽指令                          → 忽略（静默丢弃）
-非管理员且使用唤醒词                   → 忽略（静默丢弃）
-其余                                 → 放行
+非唤醒消息                              → 放行
+管理员                                 → 放行
+机器人自身事件                          → 放行
+精确命中 UMO 条目？
+  ├─ 是，且 enabled=false               → 放行（该会话关闭守卫）
+  ├─ 是                                 → 使用条目的四项设置
+  └─ 否                                 → 使用全局的四项设置
+命中放行名单                            → 放行
+命中屏蔽指令                            → 忽略（静默丢弃）
+非管理员且使用唤醒词                     → 忽略（静默丢弃）
+其余                                   → 放行
 ```
 
 - 只有 AstrBot 判定为唤醒的消息（`is_at_or_wake_command`）才进入判定；普通群聊不受影响。
-- 管理员与机器人自身事件在判定最前面，任何配置都不会拦截它们。
-- `exempt_commands` 是唯一能让非管理员绕过唤醒词开关与屏蔽清单的配置。
+- 管理员与机器人自身事件在判定最前面，任何配置和条目都不会拦截它们。
+- 条目内的 `exempt_commands` 仍然是最高优先级的放行项。
+- 没有命中 UMO 条目时，才使用全局的 `ignore_non_admin` / `ignored_commands` / `exempt_commands` / `hard_silence`。
 
 ## 唤醒方式识别
 
@@ -97,7 +145,7 @@ git clone https://github.com/cyilin36/astrbot_plugin_command_guard.git
 
 如果消息同时 @bot 且以 `/` 开头，按 `direct` 处理，不受唤醒词开关影响。`ignored_commands` 对以上四种方式都生效。
 
-注意：`ignore_non_admin` 开启时，`/crtest` 仍会因「使用了唤醒词」被开关 1 屏蔽；只有直接 `@bot crtest` 才会因为没命中 `cr` 而正常放行。两者是独立规则，不要混淆。
+注意：`ignore_non_admin` 开启时，`/crtest` 仍会因「使用了唤醒词」被唤醒词开关屏蔽；只有直接 `@bot crtest` 才会因为没命中 `cr` 而正常放行。两者是独立规则。
 
 ## 屏蔽词匹配
 
@@ -149,7 +197,14 @@ AstrBot 的指令组（`@filter.command_group` 注册，如 `cr`）会展开成�
 
 这与「机器人根本没收到这条消息」的观感一致。唯一区别是日志里会留下记录。
 
-关闭 `hard_silence` 后只剩兜底监听器，它在处理阶段才终止事件：LLM 仍不会被触发，但限流、内容安全、预处理已经跑过，AstrBot 自带的「权限不足 / 参数不足」提示也可能先出现。本插件在任何情况下都不会主动向用户发送消息。
+`hard_silence` 支持全局与按 UMO 覆盖：
+
+- 只要全局或任一启用条目开启静默，插件就会把过滤器注入到其它指令 handler 最前面；
+- 每个事件按自己命中的设置决定是否提前终止：条目关闭静默时，只跳过指令 handler，不提前终止事件，后续由兜底监听器在处理阶段拦截；
+- 全局关闭、但某个 UMO 条目开启时，该 UMO 仍能提前终止；
+- 全局开启、但某个 UMO 条目关闭时，该 UMO 的框架提示可能出现。
+
+关闭静默后只剩兜底监听器，它在处理阶段才终止事件：LLM 仍不会被触发，但限流、内容安全、预处理已经跑过，AstrBot 自带的「权限不足 / 参数不足」提示也可能先出现。本插件在任何情况下都不会主动向用户发送消息。
 
 注意：本插件只对**屏蔽**的消息保持静默。被放行的消息仍由 AstrBot 按其权限规则处理，例如非管理员直接 @bot 一个管理员专属指令时，仍可能收到 AstrBot 的权限提示。
 
@@ -158,15 +213,18 @@ AstrBot 的指令组（`@filter.command_group` 注册，如 `cr`）会展开成�
 每次屏蔽都会输出一条 INFO：
 
 ```
-[cmd_guard] 已忽略 | sender=张三/10001 wake=prefix cmd=cr reason=blocked_command(命中屏蔽指令) entry=cr
+[cmd_guard] 已忽略 | umo=aiocqhttp:GroupMessage:123456 sender=张三/10001 wake=prefix cmd=cr reason=blocked_command(命中屏蔽指令) entry=cr scope=session rule=#1
 ```
 
 字段说明：
 
+- `umo`：本次事件的统一消息来源；全局规则下也会打印，便于确认会话；
 - `wake`：`direct` / `prefix` / `private` / `other`；
 - `cmd`：屏蔽项或消息首个 token；
 - `reason`：`blocked_command`（命中屏蔽指令）或 `non_admin_wake`（非管理员唤醒词）；
-- `entry`：命中的屏蔽清单项。
+- `entry`：命中的屏蔽清单项；
+- `scope`：`global`（未命中 UMO 条目）或 `session`（命中条目）；
+- `rule`：命中的条目序号，从 `#1` 开始；全局时为 `-`。
 
 该记录是固定行为，没有配置项可以关闭。
 
@@ -174,11 +232,13 @@ AstrBot 的指令组（`@filter.command_group` 注册，如 `cr`）会展开成�
 
 - 仅覆盖 AstrBot 判定为唤醒的消息；未被唤醒的普通聊天不进入判定。
 - 私聊与 @全体在「忽略非管理员唤醒词」开关下放行，但仍受 `ignored_commands` 约束。
+- UMO 条目只影响精确匹配的会话；不会影响其它会话。
 - 群主、群管理员等平台身份不等同于 AstrBot 管理员；本插件只认 AstrBot 的 `admins_id`。
 - LLM 工具直接调用指令（如 `astrbot_plugin_llm_executor`）不经过消息管道，不受本插件约束。
 - 仅能识别 AstrBot 的 `wake_prefix` 唤醒方式；某些平台的斜杠指令如果也以 `/` 开头，可能被当作唤醒词处理。
 - 未被任何插件注册的指令仍可按文本被屏蔽；同理，屏蔽词也可能命中并非指令的普通文本（只要消息已被唤醒）。
-- 本插件没有会话（UMO）规则，所有配置都是全局的。
+- UMO 下拉选项在插件启动时加载；之后新出现的会话会在下一条消息时补入候选，配置页刷新即可看到。
+- 2.x 的 `session_rules` 不会自动转成 `umo_rules`，需要重建。
 
 ## 许可
 
